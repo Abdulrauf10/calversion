@@ -1,6 +1,9 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import * as Haptics from 'expo-haptics';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, Keyboard, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import Animated, { FadeIn, FadeOut, useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 // --- 1. Definisi Tipe Data (Interfaces dan Types) ---
 
@@ -39,6 +42,10 @@ const COMPLEX_CONVERSION_DATA: ConversionCategory[] = [
       { from: 'Feet', to: 'Meters', factor: 1 / 3.28084 },
       { from: 'Kilometers', to: 'Miles', factor: 0.621371 },
       { from: 'Miles', to: 'Kilometers', factor: 1 / 0.621371 },
+      { from: 'Centimeters', to: 'Inches', factor: 0.393701 },
+      { from: 'Inches', to: 'Centimeters', factor: 1 / 0.393701 },
+      { from: 'Yards', to: 'Meters', factor: 0.9144 },
+      { from: 'Meters', to: 'Yards', factor: 1 / 0.9144 },
     ]
   },
   // Kategori 2: Massa
@@ -48,6 +55,10 @@ const COMPLEX_CONVERSION_DATA: ConversionCategory[] = [
       { from: 'Pounds', to: 'Kilograms', factor: 1 / 2.20462 },
       { from: 'Grams', to: 'Ounces', factor: 0.035274 },
       { from: 'Ounces', to: 'Grams', factor: 1 / 0.035274 },
+      { from: 'Pounds', to: 'Ounces', factor: 16 },
+      { from: 'Ounces', to: 'Pounds', factor: 1 / 16 },
+      { from: 'Tons', to: 'Kilograms', factor: 1000 },
+      { from: 'Kilograms', to: 'Tons', factor: 1 / 1000 },
     ]
   },
   // Kategori 3: Suhu (Konversi Non-linear)
@@ -59,6 +70,12 @@ const COMPLEX_CONVERSION_DATA: ConversionCategory[] = [
       { from: 'Fahrenheit', to: 'Celsius', formula: (f: number) => (f - 32) * 5 / 9 },
       // Formula: K = C + 273.15
       { from: 'Celsius', to: 'Kelvin', formula: (c: number) => c + 273.15 },
+      // Formula: C = K - 273.15
+      { from: 'Kelvin', to: 'Celsius', formula: (k: number) => k - 273.15 },
+      // Formula: F = (K - 273.15) * 9/5 + 32
+      { from: 'Kelvin', to: 'Fahrenheit', formula: (k: number) => (k - 273.15) * 9 / 5 + 32 },
+      // Formula: K = (F - 32) * 5/9 + 273.15
+      { from: 'Fahrenheit', to: 'Kelvin', formula: (f: number) => (f - 32) * 5 / 9 + 273.15 },
     ]
   },
   // Kategori 4: Volume
@@ -68,9 +85,48 @@ const COMPLEX_CONVERSION_DATA: ConversionCategory[] = [
       { from: 'Gallons (US)', to: 'Liters', factor: 1 / 0.264172 },
       { from: 'Milliliters', to: 'Fluid Ounces (US)', factor: 0.033814 },
       { from: 'Fluid Ounces (US)', to: 'Milliliters', factor: 1 / 0.033814 },
+      { from: 'Liters', to: 'Cubic Meters', factor: 0.001 },
+      { from: 'Cubic Meters', to: 'Liters', factor: 1000 },
+      { from: 'Gallons (US)', to: 'Gallons (UK)', factor: 0.832674 },
+      { from: 'Gallons (UK)', to: 'Gallons (US)', factor: 1 / 0.832674 },
+    ]
+  },
+  // Kategori 5: Area
+  {
+    id: 'area', icon: 'square-outline', label: 'Area', conversions: [
+      { from: 'Square Meters', to: 'Square Feet', factor: 10.7639 },
+      { from: 'Square Feet', to: 'Square Meters', factor: 1 / 10.7639 },
+      { from: 'Square Kilometers', to: 'Square Miles', factor: 0.386102 },
+      { from: 'Square Miles', to: 'Square Kilometers', factor: 1 / 0.386102 },
+      { from: 'Hectares', to: 'Acres', factor: 2.47105 },
+      { from: 'Acres', to: 'Hectares', factor: 1 / 2.47105 },
+    ]
+  },
+  // Kategori 6: Time
+  {
+    id: 'time', icon: 'clock-outline', label: 'Time', conversions: [
+      { from: 'Seconds', to: 'Minutes', factor: 1 / 60 },
+      { from: 'Minutes', to: 'Seconds', factor: 60 },
+      { from: 'Minutes', to: 'Hours', factor: 1 / 60 },
+      { from: 'Hours', to: 'Minutes', factor: 60 },
+      { from: 'Hours', to: 'Days', factor: 1 / 24 },
+      { from: 'Days', to: 'Hours', factor: 24 },
+      { from: 'Days', to: 'Weeks', factor: 1 / 7 },
+      { from: 'Weeks', to: 'Days', factor: 7 },
     ]
   },
 ];
+
+// Interface untuk History
+interface ConversionHistory {
+  id: string;
+  timestamp: number;
+  inputValue: string;
+  inputUnit: string;
+  resultValue: string;
+  outputUnit: string;
+  category: string;
+}
 
 // --- 3. Komponen Utama ---
 export default function UnitConverter(): React.ReactElement {
@@ -80,6 +136,16 @@ export default function UnitConverter(): React.ReactElement {
   const [activeCategoryId, setActiveCategoryId] = useState<string>('length');
   const [activeConversionIndex, setActiveConversionIndex] = useState<number>(0);
   const [isSwapped, setIsSwapped] = useState<boolean>(false);
+  const [history, setHistory] = useState<ConversionHistory[]>([]);
+  const [showHistory, setShowHistory] = useState<boolean>(false);
+  const [showLeftFade, setShowLeftFade] = useState<boolean>(false);
+  const [showRightFade, setShowRightFade] = useState<boolean>(true);
+  const [showUnitLeftFade, setShowUnitLeftFade] = useState<boolean>(false);
+  const [showUnitRightFade, setShowUnitRightFade] = useState<boolean>(true);
+
+  // Refs untuk ScrollView
+  const categoryScrollViewRef = useRef<ScrollView>(null);
+  const unitScrollViewRef = useRef<ScrollView>(null);
 
   // --- Ambil Data Konversi Aktif ---
   const activeCategory: ConversionCategory | undefined = useMemo(() => {
@@ -110,29 +176,77 @@ export default function UnitConverter(): React.ReactElement {
   const convert = useCallback(() => {
     if (!currentConversionSet) return;
 
-    const num: number = parseFloat(inputValue);
-    if (isNaN(num) || inputValue.trim() === '') {
+    const trimmedInput = inputValue.trim();
+    if (trimmedInput === '' || trimmedInput === '-') {
       setResultValue('');
+      return;
+    }
+
+    const num: number = parseFloat(trimmedInput);
+    if (isNaN(num)) {
+      setResultValue('');
+      return;
+    }
+
+    // Validasi angka yang terlalu besar atau kecil
+    if (!isFinite(num)) {
+      setResultValue('Error');
       return;
     }
 
     let converted: number = 0;
 
-    if ('formula' in currentConversionSet && currentConversionSet.formula) {
-      // Konversi Non-Linear (Suhu)
-      converted = currentConversionSet.formula(num);
-    } else if ('factor' in currentConversionSet && currentConversionSet.factor !== undefined) {
-      // Konversi Linear
-      const factor: number = currentConversionSet.factor;
-      if (isSwapped) {
-        converted = num * (1 / factor); // Konversi terbalik
-      } else {
-        converted = num * factor;
+    try {
+      if ('formula' in currentConversionSet && currentConversionSet.formula) {
+        // Konversi Non-Linear (Suhu)
+        converted = currentConversionSet.formula(num);
+      } else if ('factor' in currentConversionSet && currentConversionSet.factor !== undefined) {
+        // Konversi Linear
+        const factor: number = currentConversionSet.factor;
+        if (isSwapped) {
+          converted = num * (1 / factor); // Konversi terbalik
+        } else {
+          converted = num * factor;
+        }
       }
-    }
 
-    setResultValue(converted.toFixed(4));
-  }, [inputValue, currentConversionSet, isSwapped]);
+      // Format hasil dengan maksimal 8 desimal, hapus trailing zeros
+      // Format angka dengan thousand separator untuk angka besar
+      let formatted = converted.toString();
+      if (converted % 1 !== 0) {
+        formatted = converted.toFixed(8).replace(/\.?0+$/, '');
+      }
+
+      // Format angka besar dengan thousand separator
+      if (Math.abs(converted) >= 1000) {
+        try {
+          const parts = formatted.split('.');
+          parts[0] = parseFloat(parts[0]).toLocaleString('en-US');
+          formatted = parts.join('.');
+        } catch (e) {
+          // Fallback ke format asli jika error
+        }
+      }
+
+      setResultValue(formatted);
+
+      // Simpan ke history jika ada input valid
+      if (trimmedInput !== '' && !isNaN(num) && isFinite(num)) {
+        const historyItem: ConversionHistory = {
+          id: Date.now().toString(),
+          timestamp: Date.now(),
+          inputValue: trimmedInput,
+          inputUnit: inputUnit,
+          resultValue: formatted,
+          outputUnit: outputUnit,
+          category: activeCategory?.label || '',
+        };
+        setHistory(prev => [historyItem, ...prev].slice(0, 10)); // Simpan maksimal 10 item
+      }
+    } catch (error) {
+      setResultValue('Error');
+    }
+  }, [inputValue, currentConversionSet, isSwapped, inputUnit, outputUnit, activeCategory]);
 
   // Efek samping: Jalankan konversi saat input/mode berubah
   useEffect(() => {
@@ -142,32 +256,45 @@ export default function UnitConverter(): React.ReactElement {
   // --- Fungsi Swap Cepat ---
   const swapConversion = (): void => {
     if ('formula' in (currentConversionSet || {})) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
       Alert.alert('Non-Linear Unit', 'Cannot use quick swap for temperature conversion due to complex formulas. Please select a different conversion.');
       return;
     }
 
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     setIsSwapped(prev => !prev);
     // Nilai hasil konversi sebelumnya menjadi input baru
     const tempResult: string = resultValue;
     setResultValue('');
     setInputValue(tempResult);
+    Keyboard.dismiss();
     // Konversi akan otomatis dipicu oleh useEffect
   };
 
   // --- Fungsi Ganti Kategori & Unit ---
   const handleCategoryChange = (categoryId: string): void => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setActiveCategoryId(categoryId);
     setActiveConversionIndex(0);
     setIsSwapped(false);
     setInputValue('');
     setResultValue('');
+    Keyboard.dismiss();
   };
 
   const handleUnitChange = (index: number): void => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setActiveConversionIndex(index);
     setIsSwapped(false);
     setInputValue('');
     setResultValue('');
+    Keyboard.dismiss();
+
+    // Reset unit selector scroll position
+    setTimeout(() => {
+      unitScrollViewRef.current?.scrollTo({ x: 0, animated: false });
+      setShowUnitLeftFade(false);
+    }, 100);
   };
 
   // --- 4. Render UI (TSX) ---
@@ -177,22 +304,114 @@ export default function UnitConverter(): React.ReactElement {
     if (!activeCategory) return null;
 
     return (
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.unitSelectorContainer}>
-        {activeCategory.conversions.map((conversion: ConversionUnit, index: number) => (
-          <Pressable
-            key={index}
-            style={[
-              styles.unitButton,
-              activeConversionIndex === index && styles.activeUnitButton,
-            ]}
-            onPress={() => handleUnitChange(index)}
-          >
-            <Text style={[styles.unitButtonText, activeConversionIndex === index && styles.activeUnitButtonText]}>
-              {conversion.from} → {conversion.to}
-            </Text>
-          </Pressable>
-        ))}
-      </ScrollView>
+      <View style={styles.unitSelectorWrapper}>
+        {/* Left Fade Indicator for Unit Selector */}
+        {showUnitLeftFade && (
+          <View style={[styles.fadeIndicator, styles.fadeLeft]}>
+            <View style={styles.fadeGradientLeft}>
+              <Pressable
+                onPress={scrollUnitLeft}
+                style={styles.fadeArrowButton}
+                accessibilityRole="button"
+                accessibilityLabel="Scroll units left"
+              >
+                <MaterialCommunityIcons name="chevron-left" size={18} color="#7FE797" style={styles.fadeArrow} />
+              </Pressable>
+            </View>
+          </View>
+        )}
+
+        <ScrollView
+          ref={unitScrollViewRef}
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.unitSelectorContainer}
+          contentContainerStyle={styles.unitSelectorContent}
+          onScroll={(event) => {
+            const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+            const scrollX = contentOffset.x;
+            const maxScrollX = contentSize.width - layoutMeasurement.width;
+
+            // Update scroll metrics
+            unitScrollMetrics.current.scrollX = scrollX;
+            unitScrollMetrics.current.contentWidth = contentSize.width;
+            unitScrollMetrics.current.layoutWidth = layoutMeasurement.width;
+
+            // Show left fade if scrolled right
+            setShowUnitLeftFade(scrollX > 5);
+
+            // Show right fade if not at the end
+            const contentWidth = contentSize.width;
+            const layoutWidth = layoutMeasurement.width;
+            setShowUnitRightFade(contentWidth > layoutWidth && scrollX < maxScrollX - 5);
+          }}
+          onContentSizeChange={(contentWidth) => {
+            // Update content width
+            unitScrollMetrics.current.contentWidth = contentWidth;
+
+            // Check if content is scrollable
+            const layoutWidth = unitScrollMetrics.current.layoutWidth;
+            if (layoutWidth > 0) {
+              const isScrollable = contentWidth > layoutWidth;
+              setShowUnitRightFade(isScrollable);
+            } else {
+              // If layout width not yet known, check later
+              setTimeout(() => {
+                const currentLayoutWidth = unitScrollMetrics.current.layoutWidth;
+                if (currentLayoutWidth > 0) {
+                  setShowUnitRightFade(contentWidth > currentLayoutWidth);
+                }
+              }, 100);
+            }
+          }}
+          onLayout={(event) => {
+            // Update layout measurement
+            const { width: layoutWidth } = event.nativeEvent.layout;
+            unitScrollMetrics.current.layoutWidth = layoutWidth;
+
+            // Check if scrollable with current content width
+            const contentWidth = unitScrollMetrics.current.contentWidth;
+            if (contentWidth > 0) {
+              setShowUnitRightFade(contentWidth > layoutWidth);
+            }
+          }}
+          scrollEventThrottle={16}
+        >
+          {activeCategory.conversions.map((conversion: ConversionUnit, index: number) => (
+            <Pressable
+              key={index}
+              style={[
+                styles.unitButton,
+                activeConversionIndex === index && styles.activeUnitButton,
+              ]}
+              onPress={() => handleUnitChange(index)}
+              accessibilityRole="button"
+              accessibilityState={{ selected: activeConversionIndex === index }}
+              accessibilityLabel={`Convert from ${conversion.from} to ${conversion.to}`}
+            >
+              <Text style={[styles.unitButtonText, activeConversionIndex === index && styles.activeUnitButtonText]}>
+                {conversion.from} → {conversion.to}
+              </Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+
+        {/* Right Fade Indicator for Unit Selector */}
+        {showUnitRightFade && (
+          <View style={[styles.fadeIndicator, styles.fadeRight]} pointerEvents="box-none">
+            <View style={styles.fadeGradientRight} pointerEvents="box-none">
+              <Pressable
+                onPress={scrollUnitRight}
+                style={styles.fadeArrowButton}
+                accessibilityRole="button"
+                accessibilityLabel="Scroll units right"
+              >
+                <MaterialCommunityIcons name="chevron-right" size={18} color="#7FE797" style={styles.fadeArrow} />
+              </Pressable>
+            </View>
+          </View>
+        )}
+      </View>
     );
   };
 
@@ -205,10 +424,14 @@ export default function UnitConverter(): React.ReactElement {
         activeCategoryId === data.id && styles.activeCategoryButton,
       ]}
       onPress={() => handleCategoryChange(data.id)}
+      accessibilityRole="button"
+      accessibilityState={{ selected: activeCategoryId === data.id }}
+      accessibilityLabel={`${data.label} category`}
+      accessibilityHint={`Select ${data.label} conversion category`}
     >
       <MaterialCommunityIcons
         name={data.icon}
-        size={24}
+        size={28}
         color={activeCategoryId === data.id ? '#0A0A0A' : '#7FE797'}
       />
       <Text style={[styles.categoryButtonText, activeCategoryId === data.id && styles.activeCategoryButtonText]}>
@@ -219,20 +442,252 @@ export default function UnitConverter(): React.ReactElement {
 
   const isTemperature: boolean = activeCategoryId === 'temperature';
 
+  // Animasi untuk swap button
+  const swapScale = useSharedValue(1);
+  const swapAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: swapScale.value }],
+  }));
+
+  const handleSwapPress = () => {
+    swapScale.value = withSpring(0.9, { damping: 15 }, () => {
+      swapScale.value = withSpring(1);
+    });
+    swapConversion();
+  };
+
+  // Refs untuk scroll metrics
+  const categoryScrollMetrics = useRef<{ scrollX: number; contentWidth: number; layoutWidth: number }>({ scrollX: 0, contentWidth: 0, layoutWidth: 0 });
+  const unitScrollMetrics = useRef<{ scrollX: number; contentWidth: number; layoutWidth: number }>({ scrollX: 0, contentWidth: 0, layoutWidth: 0 });
+
+  // Fungsi scroll untuk category selector
+  const scrollCategoryLeft = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const currentX = categoryScrollMetrics.current.scrollX;
+    const newX = Math.max(0, currentX - 150);
+
+    if (categoryScrollViewRef.current) {
+      categoryScrollViewRef.current.scrollTo({
+        x: newX,
+        animated: true,
+      });
+    }
+  }, []);
+
+  const scrollCategoryRight = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const currentX = categoryScrollMetrics.current.scrollX;
+    const maxX = Math.max(0, categoryScrollMetrics.current.contentWidth - categoryScrollMetrics.current.layoutWidth);
+    const newX = Math.min(maxX, currentX + 150);
+
+    if (categoryScrollViewRef.current) {
+      categoryScrollViewRef.current.scrollTo({
+        x: newX,
+        animated: true,
+      });
+    }
+  }, []);
+
+  // Fungsi scroll untuk unit selector
+  const scrollUnitLeft = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const currentX = unitScrollMetrics.current.scrollX;
+    const newX = Math.max(0, currentX - 150);
+
+    if (unitScrollViewRef.current) {
+      unitScrollViewRef.current.scrollTo({
+        x: newX,
+        animated: true,
+      });
+    }
+  }, []);
+
+  const scrollUnitRight = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const currentX = unitScrollMetrics.current.scrollX;
+    const maxX = Math.max(0, unitScrollMetrics.current.contentWidth - unitScrollMetrics.current.layoutWidth);
+    const newX = Math.min(maxX, currentX + 150);
+
+    if (unitScrollViewRef.current) {
+      unitScrollViewRef.current.scrollTo({
+        x: newX,
+        animated: true,
+      });
+    }
+  }, []);
+
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>Calversion</Text>
+    <SafeAreaView style={styles.container} edges={['top']}>
+      <Animated.View entering={FadeIn.duration(300)}>
+        <Text style={styles.title}>Calversion</Text>
+      </Animated.View>
 
       {/* Category Selector */}
-      <View style={styles.categorySelectorContainer}>
-        {COMPLEX_CONVERSION_DATA.map(renderCategorySelector)}
-      </View>
+      <Animated.View entering={FadeIn.delay(100).duration(300)} style={styles.categorySelectorWrapper}>
+        {/* Left Fade Indicator with Arrow */}
+        {showLeftFade && (
+          <View style={[styles.fadeIndicator, styles.fadeLeft]} pointerEvents="box-none">
+            <View style={styles.fadeGradientLeft} pointerEvents="box-none">
+              <Pressable
+                onPress={scrollCategoryLeft}
+                style={styles.fadeArrowButton}
+                accessibilityRole="button"
+                accessibilityLabel="Scroll categories left"
+              >
+                <MaterialCommunityIcons name="chevron-left" size={20} color="#7FE797" style={styles.fadeArrow} />
+              </Pressable>
+            </View>
+          </View>
+        )}
+
+        <ScrollView
+          ref={categoryScrollViewRef}
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.categorySelectorContainer}
+          contentContainerStyle={styles.categorySelectorContent}
+          onScroll={(event) => {
+            const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+            const scrollX = contentOffset.x;
+            const contentWidth = contentSize.width;
+            const layoutWidth = layoutMeasurement.width;
+            const maxScrollX = Math.max(0, contentWidth - layoutWidth);
+
+            // Update scroll metrics
+            categoryScrollMetrics.current.scrollX = scrollX;
+            categoryScrollMetrics.current.contentWidth = contentWidth;
+            categoryScrollMetrics.current.layoutWidth = layoutWidth;
+
+            // Show left fade if scrolled right
+            setShowLeftFade(scrollX > 5);
+
+            // Show right fade if not at the end
+            setShowRightFade(contentWidth > layoutWidth && scrollX < maxScrollX - 5);
+          }}
+          onContentSizeChange={(contentWidth, contentHeight) => {
+            // Update content width
+            categoryScrollMetrics.current.contentWidth = contentWidth;
+
+            // Check if content is scrollable
+            const layoutWidth = categoryScrollMetrics.current.layoutWidth;
+            if (layoutWidth > 0) {
+              const isScrollable = contentWidth > layoutWidth;
+              setShowRightFade(isScrollable);
+            } else {
+              // If layout width not yet known, check later
+              setTimeout(() => {
+                const currentLayoutWidth = categoryScrollMetrics.current.layoutWidth;
+                if (currentLayoutWidth > 0) {
+                  setShowRightFade(contentWidth > currentLayoutWidth);
+                }
+              }, 100);
+            }
+          }}
+          onLayout={(event) => {
+            // Update layout measurement
+            const { width: layoutWidth } = event.nativeEvent.layout;
+            categoryScrollMetrics.current.layoutWidth = layoutWidth;
+
+            // Check if scrollable with current content width
+            const contentWidth = categoryScrollMetrics.current.contentWidth;
+            if (contentWidth > 0) {
+              setShowRightFade(contentWidth > layoutWidth);
+            }
+          }}
+          scrollEventThrottle={16}
+        >
+          {COMPLEX_CONVERSION_DATA.map(renderCategorySelector)}
+        </ScrollView>
+
+        {/* Right Fade Indicator with Arrow */}
+        {showRightFade && (
+          <View style={[styles.fadeIndicator, styles.fadeRight]} pointerEvents="box-none">
+            <View style={styles.fadeGradientRight} pointerEvents="box-none">
+              <Pressable
+                onPress={scrollCategoryRight}
+                style={styles.fadeArrowButton}
+                accessibilityRole="button"
+                accessibilityLabel="Scroll categories right"
+              >
+                <MaterialCommunityIcons name="chevron-right" size={20} color="#7FE797" style={styles.fadeArrow} />
+              </Pressable>
+            </View>
+          </View>
+        )}
+      </Animated.View>
 
       {/* Unit Selector (Dynamic) */}
-      {renderUnitSelector()}
+      <Animated.View entering={FadeIn.delay(200).duration(300)}>
+        {renderUnitSelector()}
+      </Animated.View>
 
       {/* Main Conversion Card */}
-      <View style={styles.mainCard}>
+      <Animated.View entering={FadeIn.delay(300).duration(300)} style={styles.mainCard}>
+
+        {/* Header dengan History Toggle */}
+        <View style={styles.cardHeader}>
+          <Text style={styles.cardTitle}>Conversion</Text>
+          {history.length > 0 && (
+            <Pressable
+              onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                setShowHistory(!showHistory);
+              }}
+              style={styles.historyButton}
+              accessibilityRole="button"
+              accessibilityLabel={showHistory ? "Hide conversion history" : "Show conversion history"}
+            >
+              <MaterialCommunityIcons
+                name={showHistory ? "history" : "history"}
+                size={20}
+                color={showHistory ? "#7FE797" : "#999999"}
+              />
+              <Text style={[styles.historyButtonText, showHistory && styles.historyButtonTextActive]}>
+                History ({history.length})
+              </Text>
+            </Pressable>
+          )}
+        </View>
+
+        {/* History Panel */}
+        {showHistory && history.length > 0 && (
+          <Animated.View entering={FadeIn.duration(200)} exiting={FadeOut.duration(200)} style={styles.historyPanel}>
+            <ScrollView style={styles.historyList} showsVerticalScrollIndicator={false}>
+              {history.map((item) => (
+                <Pressable
+                  key={item.id}
+                  style={styles.historyItem}
+                  onPress={() => {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    setInputValue(item.inputValue);
+                    setShowHistory(false);
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Use previous conversion: ${item.inputValue} ${item.inputUnit} = ${item.resultValue} ${item.outputUnit}`}
+                >
+                  <View style={styles.historyContent}>
+                    <Text style={styles.historyValue}>
+                      {item.inputValue} {item.inputUnit} = {item.resultValue} {item.outputUnit}
+                    </Text>
+                    <Text style={styles.historyCategory}>{item.category}</Text>
+                  </View>
+                  <MaterialCommunityIcons name="chevron-right" size={20} color="#666666" />
+                </Pressable>
+              ))}
+            </ScrollView>
+            <Pressable
+              onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                setHistory([]);
+                setShowHistory(false);
+              }}
+              style={styles.clearHistoryButton}
+              accessibilityRole="button"
+              accessibilityLabel="Clear conversion history"
+            >
+              <Text style={styles.clearHistoryText}>Clear History</Text>
+            </Pressable>
+          </Animated.View>
+        )}
 
         {/* Input Row */}
         <View style={styles.inputRow}>
@@ -244,30 +699,46 @@ export default function UnitConverter(): React.ReactElement {
             keyboardType="numeric"
             value={inputValue}
             onChangeText={setInputValue}
+            accessibilityLabel={`Input value in ${inputUnit}`}
+            accessibilityHint="Enter a number to convert"
+            clearButtonMode="while-editing"
+            returnKeyType="done"
+            onSubmitEditing={Keyboard.dismiss}
           />
         </View>
 
         {/* Swap Button & Separator */}
         <View style={styles.separatorContainer}>
           <View style={styles.lineSeparator} />
-          <Pressable
-            style={[styles.swapButton, isTemperature && styles.disabledSwapButton]}
-            onPress={swapConversion}
-            disabled={isTemperature} // Menonaktifkan tombol secara fisik
-          >
-            <MaterialCommunityIcons name="swap-vertical" size={24} color={isTemperature ? '#666666' : '#7FE797'} />
-          </Pressable>
+          <Animated.View style={swapAnimatedStyle}>
+            <Pressable
+              style={[styles.swapButton, isTemperature && styles.disabledSwapButton]}
+              onPress={handleSwapPress}
+              disabled={isTemperature}
+              accessibilityRole="button"
+              accessibilityLabel="Swap conversion units"
+              accessibilityHint="Swaps the input and output units for linear conversions"
+            >
+              <MaterialCommunityIcons name="swap-vertical" size={24} color={isTemperature ? '#666666' : '#7FE797'} />
+            </Pressable>
+          </Animated.View>
           <View style={styles.lineSeparator} />
         </View>
 
         {/* Output Row */}
         <View style={styles.outputRow}>
           <Text style={styles.unitLabel}>{outputUnit}</Text>
-          <Text style={styles.resultText}>{resultValue || '0.0000'}</Text>
+          <Text
+            style={styles.resultText}
+            accessibilityLabel={`Result: ${resultValue || '0'} ${outputUnit}`}
+            accessibilityRole="text"
+          >
+            {resultValue || '0.0000'}
+          </Text>
         </View>
-      </View>
+      </Animated.View>
 
-    </View>
+    </SafeAreaView>
   );
 }
 
@@ -277,7 +748,7 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#0D0D0D',
     padding: 24,
-    paddingTop: 80,
+    paddingTop: 20,
   },
   title: {
     fontSize: 34,
@@ -287,44 +758,71 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     letterSpacing: 0.5,
   },
-  categorySelectorContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
+  categorySelectorWrapper: {
+    position: 'relative',
     marginBottom: 20,
-    backgroundColor: '#1A1A1A',
-    borderRadius: 15,
-    padding: 4,
-    borderWidth: 1,
-    borderColor: '#333333',
+    width: '100%',
+    minHeight: 90,
+  },
+  categorySelectorContainer: {
+    width: '100%',
+    minHeight: 90,
+  },
+  categorySelectorContent: {
+    paddingHorizontal: 4,
+    gap: 12,
+    alignItems: 'center',
+    paddingVertical: 5,
   },
   categoryButton: {
-    flex: 1,
     alignItems: 'center',
-    paddingVertical: 10,
-    borderRadius: 12,
+    justifyContent: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 16,
+    backgroundColor: '#1A1A1A',
+    borderWidth: 1.5,
+    borderColor: '#333333',
+    minWidth: 100,
+    marginRight: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 3,
+    elevation: 2,
   },
   activeCategoryButton: {
     backgroundColor: '#7FE797',
+    borderColor: '#7FE797',
     shadowColor: '#7FE797',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.4,
-    shadowRadius: 5,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.5,
+    shadowRadius: 8,
+    elevation: 6,
+    transform: [{ scale: 1.05 }],
   },
   categoryButtonText: {
-    fontSize: 10,
+    fontSize: 12,
     color: '#999999',
     fontWeight: '600',
-    marginTop: 4,
+    marginTop: 6,
     textAlign: 'center',
+    letterSpacing: 0.3,
   },
   activeCategoryButtonText: {
     color: '#0A0A0A',
     fontWeight: '700',
   },
 
+  unitSelectorWrapper: {
+    position: 'relative',
+    marginBottom: 25,
+  },
   unitSelectorContainer: {
     maxHeight: 50,
-    marginBottom: 25,
+  },
+  unitSelectorContent: {
+    paddingRight: 10,
   },
   unitButton: {
     paddingHorizontal: 15,
@@ -423,5 +921,135 @@ const styles = StyleSheet.create({
   },
   disabledSwapButton: {
     borderColor: '#333333',
-  }
+  },
+  cardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  cardTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#E0E0E0',
+  },
+  historyButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: '#1A1A1A',
+    borderWidth: 1,
+    borderColor: '#333333',
+    gap: 6,
+  },
+  historyButtonText: {
+    fontSize: 12,
+    color: '#999999',
+    fontWeight: '600',
+  },
+  historyButtonTextActive: {
+    color: '#7FE797',
+  },
+  historyPanel: {
+    marginBottom: 20,
+    maxHeight: 200,
+    backgroundColor: '#1A1A1A',
+    borderRadius: 12,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#333333',
+  },
+  historyList: {
+    maxHeight: 150,
+  },
+  historyItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 8,
+    borderRadius: 8,
+    marginBottom: 4,
+    backgroundColor: '#151515',
+  },
+  historyContent: {
+    flex: 1,
+  },
+  historyValue: {
+    fontSize: 14,
+    color: '#E0E0E0',
+    fontWeight: '500',
+    marginBottom: 4,
+  },
+  historyCategory: {
+    fontSize: 11,
+    color: '#7FE797',
+    fontWeight: '500',
+  },
+  clearHistoryButton: {
+    marginTop: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: '#2A2A2A',
+    alignItems: 'center',
+  },
+  clearHistoryText: {
+    fontSize: 12,
+    color: '#FF6B6B',
+    fontWeight: '600',
+  },
+  fadeIndicator: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 50,
+    zIndex: 10,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  fadeLeft: {
+    left: 0,
+  },
+  fadeRight: {
+    right: 0,
+  },
+  fadeGradientLeft: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: 50,
+    backgroundColor: '#0D0D0D',
+    opacity: 0.9,
+    justifyContent: 'center',
+    alignItems: 'flex-start',
+    paddingLeft: 8,
+    pointerEvents: 'box-none',
+  },
+  fadeGradientRight: {
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    bottom: 0,
+    width: 50,
+    backgroundColor: '#0D0D0D',
+    opacity: 0.9,
+    justifyContent: 'center',
+    alignItems: 'flex-end',
+    paddingRight: 8,
+    pointerEvents: 'box-none',
+  },
+  fadeArrow: {
+    opacity: 0.8,
+  },
+  fadeArrowButton: {
+    padding: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 20,
+    minWidth: 36,
+    minHeight: 36,
+  },
 });
