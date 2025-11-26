@@ -32,6 +32,17 @@ interface ConversionCategory {
   conversions: ConversionUnit[];
 }
 
+// Interface untuk History
+interface ConversionHistory {
+  id: string;
+  timestamp: number;
+  inputValue: string;
+  inputUnit: string;
+  resultValue: string;
+  outputUnit: string;
+  category: string;
+}
+
 // --- 2. Data Konversi Kompleks (Typed) ---
 
 const COMPLEX_CONVERSION_DATA: ConversionCategory[] = [
@@ -115,18 +126,12 @@ const COMPLEX_CONVERSION_DATA: ConversionCategory[] = [
       { from: 'Weeks', to: 'Days', factor: 7 },
     ]
   },
+  // Kategori Kustom BARU
+  {
+    id: 'custom', icon: 'form-select', label: 'Custom', conversions: [] // Kosong karena diisi oleh user
+  }
 ];
 
-// Interface untuk History
-interface ConversionHistory {
-  id: string;
-  timestamp: number;
-  inputValue: string;
-  inputUnit: string;
-  resultValue: string;
-  outputUnit: string;
-  category: string;
-}
 
 // --- 3. Komponen Utama ---
 export default function UnitConverter(): React.ReactElement {
@@ -143,21 +148,46 @@ export default function UnitConverter(): React.ReactElement {
   const [showUnitLeftFade, setShowUnitLeftFade] = useState<boolean>(false);
   const [showUnitRightFade, setShowUnitRightFade] = useState<boolean>(true);
 
+  // --- State untuk Konversi Kustom BARU ---
+  const [customFromUnit, setCustomFromUnit] = useState<string>('');
+  const [customToUnit, setCustomToUnit] = useState<string>('');
+  const [customFactor, setCustomFactor] = useState<string>('');
+
   // Refs untuk ScrollView
   const categoryScrollViewRef = useRef<ScrollView>(null);
   const unitScrollViewRef = useRef<ScrollView>(null);
+
+  // Refs untuk scroll metrics (mempertahankan fungsi scrolling)
+  const categoryScrollMetrics = useRef<{ scrollX: number; contentWidth: number; layoutWidth: number }>({ scrollX: 0, contentWidth: 0, layoutWidth: 0 });
+  const unitScrollMetrics = useRef<{ scrollX: number; contentWidth: number; layoutWidth: number }>({ scrollX: 0, contentWidth: 0, layoutWidth: 0 });
 
   // --- Ambil Data Konversi Aktif ---
   const activeCategory: ConversionCategory | undefined = useMemo(() => {
     return COMPLEX_CONVERSION_DATA.find(d => d.id === activeCategoryId);
   }, [activeCategoryId]);
 
+  // Dapatkan konversi aktif, atau buat "konversi kustom" fiktif
   const currentConversionSet: ConversionUnit | undefined = useMemo(() => {
+    if (activeCategoryId === 'custom') {
+      // Konversi Kustom: Selalu Linear (sesuai batasan)
+      const factorNum = parseFloat(customFactor);
+      return {
+        from: customFromUnit || 'Unit A',
+        to: customToUnit || 'Unit B',
+        factor: isNaN(factorNum) ? 0 : factorNum,
+      } as LinearConversion; // Cast untuk tipe
+    }
     return activeCategory?.conversions[activeConversionIndex];
-  }, [activeCategory, activeConversionIndex]);
+  }, [activeCategory, activeConversionIndex, activeCategoryId, customFromUnit, customToUnit, customFactor]);
 
   // Tentukan Unit Input/Output
   const [inputUnit, outputUnit]: [string, string] = useMemo(() => {
+    if (activeCategoryId === 'custom') {
+      return isSwapped
+        ? [customToUnit || 'Unit B', customFromUnit || 'Unit A']
+        : [customFromUnit || 'Unit A', customToUnit || 'Unit B'];
+    }
+
     if (currentConversionSet) {
       // Jika Non-Linear (Suhu), tidak bisa di-swap
       if ('formula' in currentConversionSet) {
@@ -169,7 +199,7 @@ export default function UnitConverter(): React.ReactElement {
         : [currentConversionSet.from, currentConversionSet.to];
     }
     return ['', ''];
-  }, [currentConversionSet, isSwapped]);
+  }, [currentConversionSet, isSwapped, activeCategoryId, customFromUnit, customToUnit]);
 
 
   // --- Fungsi Konversi Utama ---
@@ -201,17 +231,26 @@ export default function UnitConverter(): React.ReactElement {
         // Konversi Non-Linear (Suhu)
         converted = currentConversionSet.formula(num);
       } else if ('factor' in currentConversionSet && currentConversionSet.factor !== undefined) {
-        // Konversi Linear
+        // Konversi Linear atau Kustom
         const factor: number = currentConversionSet.factor;
+
+        if (activeCategoryId === 'custom' && factor === 0) {
+          setResultValue('Factor must be non-zero');
+          return;
+        }
+
         if (isSwapped) {
-          converted = num * (1 / factor); // Konversi terbalik
+          // Konversi terbalik
+          converted = num * (1 / factor);
         } else {
           converted = num * factor;
         }
+      } else {
+        setResultValue('Error: No formula/factor');
+        return;
       }
 
-      // Format hasil dengan maksimal 8 desimal, hapus trailing zeros
-      // Format angka dengan thousand separator untuk angka besar
+      // Format hasil
       let formatted = converted.toString();
       if (converted % 1 !== 0) {
         formatted = converted.toFixed(8).replace(/\.?0+$/, '');
@@ -221,7 +260,8 @@ export default function UnitConverter(): React.ReactElement {
       if (Math.abs(converted) >= 1000) {
         try {
           const parts = formatted.split('.');
-          parts[0] = parseFloat(parts[0]).toLocaleString('en-US');
+          // Hapus koma sebelumnya jika ada, lalu format ulang
+          parts[0] = parseFloat(parts[0].replace(/,/g, '')).toLocaleString('en-US');
           formatted = parts.join('.');
         } catch (e) {
           // Fallback ke format asli jika error
@@ -239,14 +279,14 @@ export default function UnitConverter(): React.ReactElement {
           inputUnit: inputUnit,
           resultValue: formatted,
           outputUnit: outputUnit,
-          category: activeCategory?.label || '',
+          category: activeCategoryId === 'custom' ? `Custom: ${customFromUnit || 'Unit A'} ↔ ${customToUnit || 'Unit B'}` : (activeCategory?.label || ''),
         };
         setHistory(prev => [historyItem, ...prev].slice(0, 10)); // Simpan maksimal 10 item
       }
     } catch (error) {
       setResultValue('Error');
     }
-  }, [inputValue, currentConversionSet, isSwapped, inputUnit, outputUnit, activeCategory]);
+  }, [inputValue, currentConversionSet, isSwapped, inputUnit, outputUnit, activeCategory, activeCategoryId, customFactor, customFromUnit, customToUnit]);
 
   // Efek samping: Jalankan konversi saat input/mode berubah
   useEffect(() => {
@@ -255,9 +295,18 @@ export default function UnitConverter(): React.ReactElement {
 
   // --- Fungsi Swap Cepat ---
   const swapConversion = (): void => {
-    if ('formula' in (currentConversionSet || {})) {
+    const isTemperature = activeCategoryId === 'temperature';
+    const isCustom = activeCategoryId === 'custom';
+
+    if (isTemperature) {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
       Alert.alert('Non-Linear Unit', 'Cannot use quick swap for temperature conversion due to complex formulas. Please select a different conversion.');
+      return;
+    }
+
+    if (isCustom && parseFloat(customFactor) === 0) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+      Alert.alert('Invalid Factor', 'Cannot swap if the custom factor is 0.');
       return;
     }
 
@@ -280,6 +329,20 @@ export default function UnitConverter(): React.ReactElement {
     setInputValue('');
     setResultValue('');
     Keyboard.dismiss();
+
+    // Reset unit selector scroll position
+    setTimeout(() => {
+      unitScrollViewRef.current?.scrollTo({ x: 0, animated: false });
+      setShowUnitLeftFade(false);
+      // Jika kategori kustom, unit selector tersembunyi, jadi tidak perlu fade kanan
+      if (categoryId === 'custom') {
+        setShowUnitRightFade(false);
+      } else {
+        // Logika ini akan diurus oleh onLayout/onContentSizeChange,
+        // tapi defaultnya kita anggap bisa discroll
+        setShowUnitRightFade(true);
+      }
+    }, 100);
   };
 
   const handleUnitChange = (index: number): void => {
@@ -297,11 +360,68 @@ export default function UnitConverter(): React.ReactElement {
     }, 100);
   };
 
+  // Fungsi scroll untuk category selector (dipertahankan)
+  const scrollCategoryLeft = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const currentX = categoryScrollMetrics.current.scrollX;
+    const newX = Math.max(0, currentX - 150);
+
+    if (categoryScrollViewRef.current) {
+      categoryScrollViewRef.current.scrollTo({
+        x: newX,
+        animated: true,
+      });
+    }
+  }, []);
+
+  const scrollCategoryRight = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const currentX = categoryScrollMetrics.current.scrollX;
+    const maxX = Math.max(0, categoryScrollMetrics.current.contentWidth - categoryScrollMetrics.current.layoutWidth);
+    const newX = Math.min(maxX, currentX + 150);
+
+    if (categoryScrollViewRef.current) {
+      categoryScrollViewRef.current.scrollTo({
+        x: newX,
+        animated: true,
+      });
+    }
+  }, []);
+
+  // Fungsi scroll untuk unit selector (dipertahankan)
+  const scrollUnitLeft = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const currentX = unitScrollMetrics.current.scrollX;
+    const newX = Math.max(0, currentX - 150);
+
+    if (unitScrollViewRef.current) {
+      unitScrollViewRef.current.scrollTo({
+        x: newX,
+        animated: true,
+      });
+    }
+  }, []);
+
+  const scrollUnitRight = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const currentX = unitScrollMetrics.current.scrollX;
+    const maxX = Math.max(0, unitScrollMetrics.current.contentWidth - unitScrollMetrics.current.layoutWidth);
+    const newX = Math.min(maxX, currentX + 150);
+
+    if (unitScrollViewRef.current) {
+      unitScrollViewRef.current.scrollTo({
+        x: newX,
+        animated: true,
+      });
+    }
+  }, []);
+
+
   // --- 4. Render UI (TSX) ---
 
-  // Render selector unit spesifik
+  // Render selector unit spesifik (dipertahankan & disembunyikan untuk kustom)
   const renderUnitSelector = (): React.ReactElement | null => {
-    if (!activeCategory) return null;
+    if (!activeCategory || activeCategoryId === 'custom') return null;
 
     return (
       <View style={styles.unitSelectorWrapper}>
@@ -415,7 +535,7 @@ export default function UnitConverter(): React.ReactElement {
     );
   };
 
-  // Render Kategori Selector
+  // Render Kategori Selector (dipertahankan)
   const renderCategorySelector = (data: ConversionCategory): React.ReactElement => (
     <Pressable
       key={data.id}
@@ -440,7 +560,62 @@ export default function UnitConverter(): React.ReactElement {
     </Pressable>
   );
 
+  // --- Component Kustom Input BARU ---
+  const renderCustomConversionInputs = (): React.ReactElement => (
+    <Animated.View entering={FadeIn.duration(300)} style={styles.customInputContainer}>
+      <Text style={styles.customTitle}>Define Your Custom Conversion (Linear)</Text>
+
+      {/* Unit 'From' & 'To' */}
+      <View style={styles.customUnitRow}>
+        <TextInput
+          style={styles.customUnitInput}
+          placeholder="Unit A Name (e.g., USD)"
+          placeholderTextColor="#666666"
+          value={customFromUnit}
+          onChangeText={setCustomFromUnit}
+          autoCapitalize="words"
+          accessibilityLabel="Custom 'From' Unit Name"
+        />
+        <MaterialCommunityIcons name="arrow-right-bold" size={20} color="#7FE797" style={{ marginHorizontal: 10 }} />
+        <TextInput
+          style={styles.customUnitInput}
+          placeholder="Unit B Name (e.g., EUR)"
+          placeholderTextColor="#666666"
+          value={customToUnit}
+          onChangeText={setCustomToUnit}
+          autoCapitalize="words"
+          accessibilityLabel="Custom 'To' Unit Name"
+        />
+      </View>
+
+      {/* Factor Input */}
+      <View style={styles.customFactorRow}>
+        <Text style={styles.customFactorText}>
+          1 {customFromUnit || 'Unit A'} =
+        </Text>
+        <TextInput
+          style={styles.customFactorInput}
+          placeholder="Factor (e.g., 0.85)"
+          placeholderTextColor="#666666"
+          keyboardType="numeric"
+          value={customFactor}
+          onChangeText={setCustomFactor}
+          accessibilityLabel="Custom Conversion Factor"
+        />
+        <Text style={styles.customFactorText}>
+          {customToUnit || 'Unit B'}
+        </Text>
+      </View>
+      <Text style={styles.customHint}>
+        *Conversion will be $Input \times Factor$. Leave factor at 1 if 1:1.
+      </Text>
+    </Animated.View>
+  );
+  // --- End Component Kustom Input BARU ---
+
   const isTemperature: boolean = activeCategoryId === 'temperature';
+  const isCustom: boolean = activeCategoryId === 'custom';
+  const isSwapDisabled: boolean = isTemperature || (isCustom && parseFloat(customFactor) === 0);
 
   // Animasi untuk swap button
   const swapScale = useSharedValue(1);
@@ -454,66 +629,6 @@ export default function UnitConverter(): React.ReactElement {
     });
     swapConversion();
   };
-
-  // Refs untuk scroll metrics
-  const categoryScrollMetrics = useRef<{ scrollX: number; contentWidth: number; layoutWidth: number }>({ scrollX: 0, contentWidth: 0, layoutWidth: 0 });
-  const unitScrollMetrics = useRef<{ scrollX: number; contentWidth: number; layoutWidth: number }>({ scrollX: 0, contentWidth: 0, layoutWidth: 0 });
-
-  // Fungsi scroll untuk category selector
-  const scrollCategoryLeft = useCallback(() => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    const currentX = categoryScrollMetrics.current.scrollX;
-    const newX = Math.max(0, currentX - 150);
-
-    if (categoryScrollViewRef.current) {
-      categoryScrollViewRef.current.scrollTo({
-        x: newX,
-        animated: true,
-      });
-    }
-  }, []);
-
-  const scrollCategoryRight = useCallback(() => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    const currentX = categoryScrollMetrics.current.scrollX;
-    const maxX = Math.max(0, categoryScrollMetrics.current.contentWidth - categoryScrollMetrics.current.layoutWidth);
-    const newX = Math.min(maxX, currentX + 150);
-
-    if (categoryScrollViewRef.current) {
-      categoryScrollViewRef.current.scrollTo({
-        x: newX,
-        animated: true,
-      });
-    }
-  }, []);
-
-  // Fungsi scroll untuk unit selector
-  const scrollUnitLeft = useCallback(() => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    const currentX = unitScrollMetrics.current.scrollX;
-    const newX = Math.max(0, currentX - 150);
-
-    if (unitScrollViewRef.current) {
-      unitScrollViewRef.current.scrollTo({
-        x: newX,
-        animated: true,
-      });
-    }
-  }, []);
-
-  const scrollUnitRight = useCallback(() => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    const currentX = unitScrollMetrics.current.scrollX;
-    const maxX = Math.max(0, unitScrollMetrics.current.contentWidth - unitScrollMetrics.current.layoutWidth);
-    const newX = Math.min(maxX, currentX + 150);
-
-    if (unitScrollViewRef.current) {
-      unitScrollViewRef.current.scrollTo({
-        x: newX,
-        animated: true,
-      });
-    }
-  }, []);
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -615,10 +730,17 @@ export default function UnitConverter(): React.ReactElement {
         )}
       </Animated.View>
 
-      {/* Unit Selector (Dynamic) */}
+      {/* Unit Selector (Dynamic) - Tersembunyi di mode Kustom */}
       <Animated.View entering={FadeIn.delay(200).duration(300)}>
         {renderUnitSelector()}
       </Animated.View>
+
+      {/* Input Kustom - Tampilkan hanya di mode Kustom */}
+      {isCustom && (
+        <Animated.View entering={FadeIn.delay(200).duration(300)}>
+          {renderCustomConversionInputs()}
+        </Animated.View>
+      )}
 
       {/* Main Conversion Card */}
       <Animated.View entering={FadeIn.delay(300).duration(300)} style={styles.mainCard}>
@@ -712,14 +834,14 @@ export default function UnitConverter(): React.ReactElement {
           <View style={styles.lineSeparator} />
           <Animated.View style={swapAnimatedStyle}>
             <Pressable
-              style={[styles.swapButton, isTemperature && styles.disabledSwapButton]}
+              style={[styles.swapButton, isSwapDisabled && styles.disabledSwapButton]}
               onPress={handleSwapPress}
-              disabled={isTemperature}
+              disabled={isSwapDisabled}
               accessibilityRole="button"
               accessibilityLabel="Swap conversion units"
               accessibilityHint="Swaps the input and output units for linear conversions"
             >
-              <MaterialCommunityIcons name="swap-vertical" size={24} color={isTemperature ? '#666666' : '#7FE797'} />
+              <MaterialCommunityIcons name="swap-vertical" size={24} color={isSwapDisabled ? '#666666' : '#7FE797'} />
             </Pressable>
           </Animated.View>
           <View style={styles.lineSeparator} />
@@ -742,7 +864,7 @@ export default function UnitConverter(): React.ReactElement {
   );
 }
 
-// --- 5. Stylesheet (Tidak Berubah dari versi sebelumnya yang bagus) ---
+// --- 5. Stylesheet (Lengkap dengan Styles Kustom) ---
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -1052,4 +1174,73 @@ const styles = StyleSheet.create({
     minWidth: 36,
     minHeight: 36,
   },
+  // --- Styles Kustom BARU ---
+  customInputContainer: {
+    padding: 20,
+    backgroundColor: '#1C1C1C',
+    borderRadius: 16,
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: '#333333',
+  },
+  customTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#7FE797',
+    marginBottom: 15,
+    textAlign: 'center',
+  },
+  customUnitRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 15,
+    justifyContent: 'space-between',
+  },
+  customUnitInput: {
+    flex: 1,
+    padding: 10,
+    backgroundColor: '#2A2A2A',
+    borderRadius: 8,
+    color: '#E0E0E0',
+    fontSize: 14,
+    fontWeight: '500',
+    textAlign: 'center',
+    minWidth: 100,
+  },
+  customFactorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+    justifyContent: 'space-between',
+    backgroundColor: '#2A2A2A',
+    borderRadius: 8,
+    padding: 10,
+  },
+  customFactorText: {
+    fontSize: 14,
+    color: '#CCCCCC',
+    fontWeight: '500',
+    minWidth: 50,
+    textAlign: 'center',
+  },
+  customFactorInput: {
+    flex: 1,
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    backgroundColor: '#333333',
+    borderRadius: 6,
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+    textAlign: 'center',
+    marginHorizontal: 10,
+    minWidth: 80,
+  },
+  customHint: {
+    fontSize: 11,
+    color: '#999999',
+    marginTop: 5,
+    textAlign: 'left',
+    paddingHorizontal: 10,
+  }
 });
